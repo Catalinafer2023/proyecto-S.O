@@ -3,8 +3,58 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
+#include <ctype.h>
 
 #define PROMPT "mishell:$ "
+
+// ---------- trim in-place (retorna el puntero al primer no espacio)-----
+static char* trim(char *s){
+    if(!s) return s;
+    while (*s && isspace((unsigned char)*s)) s++;
+    if(*s == '\0') return s;
+    char *end = s + strlen(s) -1;
+    while(end > s && isspace((unsigned char)*end)) end--;
+    end[1] = '\0';
+    return s;
+}
+
+//------------ tokenizador por espacios y tabs -------------
+static char** tokenize_argv(const char *line){
+    int cap = 8, n = 0;
+    char **argv = malloc(cap * sizeof(*argv));
+    if(!argv) { perror("malloc"); exit(1);}
+
+    char *copy = strdup(line);
+    if(!copy){ perror("strdup"); exit(1);}
+
+    char *tok = strtok(copy, " \t");
+    while(tok){
+        if(n == cap){
+            cap *= 2;
+            char **tmp = realloc(argv, cap * sizeof(*argv));
+            if (!tmp) { perror("realloc"); free(argv); free(copy); exit(1);}
+            argv = tmp;
+        }
+        argv[n++] = strdup(tok);
+        tok = strtok(NULL, "\t");
+    }
+
+    if(n == cap){
+        char **tmp = realloc(argv, (cap + 1) * sizeof(*argv));
+        if(!tmp) { perror("realloc"); free(argv); free(copy); exit(1);}
+        argv = tmp;
+    }
+    argv[n] = NULL;
+
+    free(copy);
+    return argv;
+}
+
+static void free_argv(char **argv) {
+    if (!argv) return;
+    for (int i = 0; argv[i]; ++i) free(argv[i]);
+    free(argv);
+}
 
 static void print_prompt(void){
     if(isatty(STDIN_FILENO)){
@@ -24,6 +74,23 @@ int main(void) {
             if (isatty(STDIN_FILENO)) write(STDOUT_FILENO, "\n", 1);
             break;
         }
+
+        if (n > 0 && line[n-1] == '\n') line[n-1] = '\0';
+
+        char *t = trim(line);
+        if(*t == '\0') {
+            continue;
+        }
+
+        char **argv = tokenize_argv(t);
+
+#ifdef MISHELL_DEBUG_TOKENS
+        for(int i = 0;argv[i]; ++i){
+            printf("[arg%d] = \"%s\"\n", i, argv[i]);
+        }
+#endif        
+
+        free_argv(argv);
     }
 
     free(line);
