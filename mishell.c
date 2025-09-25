@@ -36,7 +36,7 @@ static char** tokenize_argv(const char *line){
             argv = tmp;
         }
         argv[n++] = strdup(tok);
-        tok = strtok(NULL, "\t");
+        tok = strtok(NULL, " \t");
     }
 
     if(n == cap){
@@ -65,6 +65,7 @@ static void print_prompt(void){
 int main(void) {
     char *line = NULL;
     size_t cap = 0;
+    int shell_status = 0;
 
     for(;;) {
         print_prompt();
@@ -83,12 +84,35 @@ int main(void) {
         }
 
         char **argv = tokenize_argv(t);
-
-#ifdef MISHELL_DEBUG_TOKENS
-        for(int i = 0;argv[i]; ++i){
-            printf("[arg%d] = \"%s\"\n", i, argv[i]);
+        if(!argv[0]) {
+            free_argv(argv);
+            continue;
         }
-#endif        
+        
+        if(strcmp(argv[0], "exit") == 0){
+            if(argv[1] == NULL){
+                free_argv(argv);
+                break;
+            } 
+            if (argv[2] != NULL){
+                fprintf(stderr, "exit: demasiados argumentos\n");
+                free_argv(argv);
+                continue;
+            } 
+        
+            char *end = NULL;
+            long v = strtol(argv[1], &end, 10);
+            if(argv[1][0] == '\0' || *end != '\0'){
+                fprintf(stderr, "exit: argumento no numerico: %s\n", argv[1]);
+                free_argv(argv);
+                continue;
+                }
+
+            shell_status = (int)(v & 0xFF);
+            free_argv(argv);
+            break;
+        }
+            
 
         free_argv(argv);
     }
