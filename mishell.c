@@ -4,6 +4,8 @@
 #include <unistd.h>
 #include <string.h>
 #include <ctype.h>
+#include <sys/wait.h>
+#include <errno.h>
 
 #define PROMPT "mishell:$ "
 
@@ -48,6 +50,25 @@ static char** tokenize_argv(const char *line){
 
     free(copy);
     return argv;
+}
+
+static int runnear_comando(char **argv){
+    pid_t pid = fork();
+    if(pid <0){
+        perror("fork");
+        return 1;
+    }
+    if(pid == 0){
+        execvp(argv[0], argv);
+        perror(argv[0]);
+        _exit(127);
+    }
+
+    int status = 0;
+    while (waitpid(pid, &status, 0) == -1 &&errno == EINTR){}
+    if(WIFEXITED(status)) return WEXITSTATUS(status);
+    if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
+    return 1;
 }
 
 static void free_argv(char **argv) {
@@ -112,8 +133,9 @@ int main(void) {
             free_argv(argv);
             break;
         }
-            
 
+        int rc = runnear_comando(argv);
+        shell_status = rc;
         free_argv(argv);
     }
 
