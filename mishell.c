@@ -6,6 +6,7 @@
 #include <ctype.h>
 #include <sys/wait.h>
 #include <errno.h>
+#include <signal.h>
 
 #define PROMPT "mishell:$ "
 
@@ -53,12 +54,19 @@ static char** tokenize_argv(const char *line){
 }
 
 static int runnear_comando(char **argv){
+    struct sigaction sa_ign = {0}, sa_old = {0};
+    sa_ign.sa_handler = SIG_IGN;
+    sigemptyset(&sa_ign.sa_mask);
+    sigaction(SIGINT, &sa_ign, &sa_old);
+
     pid_t pid = fork();
     if(pid <0){
         perror("fork");
+        sigaction(SIGINT, &sa_old, NULL);
         return 1;
     }
     if(pid == 0){
+        sigaction(SIGINT,&sa_old, NULL);
         execvp(argv[0], argv);
         perror(argv[0]);
         _exit(127);
@@ -66,6 +74,7 @@ static int runnear_comando(char **argv){
 
     int status = 0;
     while (waitpid(pid, &status, 0) == -1 &&errno == EINTR){}
+    sigaction(SIGINT, &sa_old, NULL);
     if(WIFEXITED(status)) return WEXITSTATUS(status);
     if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
     return 1;
@@ -140,5 +149,5 @@ int main(void) {
     }
 
     free(line);
-    return 0;
+    return shell_status;
 }
