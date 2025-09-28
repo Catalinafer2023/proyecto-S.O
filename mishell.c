@@ -5,8 +5,12 @@
 #include <string.h>
 #include <ctype.h>
 #include <sys/wait.h>
+#include <sys/resource.h>
+#include <sys/types.h>
 #include <errno.h>
 #include <signal.h>
+#include <time.h>
+
 
 #define PROMPT "mishell:$ "
 
@@ -107,7 +111,7 @@ static int runnear_comando(char **argv){
     }
 
     int status = 0;
-    while (waitpid(pid, &status, 0) == -1 &&errno == EINTR){}
+    while (waitpid(pid, &status, 0) == -1 && errno == EINTR){}
     sigaction(SIGINT, &sa_old, NULL);
     if(WIFEXITED(status)) return WEXITSTATUS(status);
     if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
@@ -211,6 +215,94 @@ static int run_pipeline(char **stages, int k){
     return 1;
 }
 
+static double now_sec(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
+static char* unir_argv(char **av) {
+    size_t cap = 128, len = 0;
+    char *s = malloc(cap);
+    if(!s) { perror("malloc"); exit(1); }
+    s[0] = '\0';
+    for( int i = 0; av[i]; ++i) {
+        size_t w = strlen(av[i]);
+        if (len + (i ? 1 : 0) + w + 1 > cap) {
+            cap = (len + 1 + w + 1) * 2;
+            char *tmp = realloc(s, cap);
+            if(!tmp) { perror("realloc"); free(s); exit(1); }
+            s = tmp;
+        }
+        if(i) s[len++] = ' ';
+        memcpy(s + len, av[i], w);
+        len += w;
+        s[len] = '\0';
+    }
+    return s;
+}
+
+static int miprof_exec_basic(char **cmd_argv,
+                             double *real_s, double *user_s, double *sys_s,
+                             long *maxrss_kb, int *status_code)
+{
+    struct sigaction sa_ign = {0}, sa_old = {0};
+    sa_ign.sa_handler = SIG_IGN;
+    sigemptyset(&sa_ign.sa_mask);
+    sigaction(SIGINT, &sa_ign, &sa_old);
+
+    double t0 = now_sec();
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        perror("fork");
+        sigaction(SIGINT, &sa_old, NULL);
+        return 1;
+    }
+    if (pid == 0) {
+        sigaction(SIGINT, &sa_old, NULL);
+        execvp(cmd_argv[0], cmd_argv);    
+        perror(cmd_argv[0]);
+        _exit(127);
+    }
+
+    int status = 0;
+    struct rusage ru;
+    pid_t w;
+    do { w = wait4(pid, &status, 0, &ru); } while (w == -1 && errno == EINTR);
+
+    double t1 = now_sec();
+    sigaction(SIGINT, &sa_old, NULL);
+
+    if (w != pid) return 1;
+
+    *real_s = t1 - t0;
+    *user_s = (double)ru.ru_utime.tv_sec + (double)ru.ru_utime.tv_usec / 1e6;
+    *sys_s  = (double)ru.ru_stime.tv_sec + (double)ru.ru_stime.tv_usec / 1e6;
+    *maxrss_kb = ru.ru_maxrss; 
+
+    if (WIFEXITED(status))         *status_code = WEXITSTATUS(status);
+    else if (WIFSIGNALED(status))  *status_code = 128 + WTERMSIG(status);
+    else                           *status_code = 1;
+
+    return 0;
+}
+
+
+static void miprof_save(const char *path, const char *cmdline,
+                        double real_s, double user_s, double sys_s,
+                        long maxrss_kb, int status_code)
+{
+    FILE *f = fopen(path, "a");
+    if(!f) { perror(path); return; }
+    fprintf(f, "miprof: %s\n", cmdline);
+    fprintf(f, "real=%.6fs user=%.6fs sys=%.6fs maxrss=%ld KiB\n",
+        real_s, user_s, sys_s, maxrss_kb);
+    fprintf(f, "exit_status=%d\n", status_code);
+    fprintf(f, "-----\n");
+    fclose(f);
+}
+
 static void free_argv(char **argv) {
     if (!argv) return;
     for (int i = 0; argv[i]; ++i) free(argv[i]);
@@ -287,6 +379,50 @@ int main(void) {
             break;
         }
 
+        if (strcmp(argv[0], "miprof") == 0) {
+            int argc = 0; while (argv[argc]) argc++;
+
+            if (argc >= 3 && strcmp(argv[1], "ejec") == 0) {
+                char **cmd = &argv[2];
+                double real_s, user_s, sys_s; long maxrss_kb; int code;
+                if (miprof_exec_basic(cmd, &real_s, &user_s, &sys_s, &maxrss_kb, &code) != 0) {
+                    fprintf(stderr, "miprof: fallo al ejecutar\n");
+                }
+                char *cmdline = unir_argv(cmd);
+                printf("miprof: %s\n", cmdline);
+                printf("real=%.6fs user=%.6fs sys=%.6fs maxrss=%ld KiB\n",
+                       real_s, user_s, sys_s, maxrss_kb);
+                printf("exit_status=%d\n", code);
+                shell_status = code;
+                free(cmdline);
+                free_argv(argv);
+                continue;                 
+            }
+            else if (argc >= 4 && strcmp(argv[1], "ejecsave") == 0) {
+                const char *path = argv[2];
+                char **cmd = &argv[3];
+                double real_s, user_s, sys_s; long maxrss_kb; int code;
+                if (miprof_exec_basic(cmd, &real_s, &user_s, &sys_s, &maxrss_kb, &code) != 0) {
+                    fprintf(stderr, "miprof: fallo al ejecutar\n");
+                }
+                char *cmdline = unir_argv(cmd);
+                printf("miprof: %s\n", cmdline);
+                printf("real=%.6fs user=%.6fs sys=%.6fs maxrss=%ld KiB\n",
+                       real_s, user_s, sys_s, maxrss_kb);
+                printf("exit_status=%d\n", code);
+                miprof_save(path, cmdline, real_s, user_s, sys_s, maxrss_kb, code);
+                shell_status = code;
+                free(cmdline);
+                free_argv(argv);
+                continue;                 
+            }
+
+            else {
+                fprintf(stderr, "uso: miprof {ejec|ejecsave  <archivo>} comando [args...]\n");
+                free_argv(argv);
+                continue;   
+            }
+        }
         int rc = runnear_comando(argv);
         shell_status = rc;
         free_argv(argv);
@@ -294,4 +430,4 @@ int main(void) {
 
     free(line);
     return shell_status;
-}
+}  

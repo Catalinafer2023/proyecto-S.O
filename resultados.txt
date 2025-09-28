@@ -1,0 +1,4 @@
+miprof: ls -l
+real=0.045448s user=0.000000s sys=0.019568s maxrss=2432 KiB
+exit_status=0
+-----
