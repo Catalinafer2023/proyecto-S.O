@@ -288,6 +288,67 @@ static int miprof_exec_basic(char **cmd_argv,
     return 0;
 }
 
+static int miprof_exec_timeout(char **cmd_argv, int timeout_sec, double *real_s, double *user_s, double *sys_s, long *maxrss_kb, int *timed_out, int *status_code){
+    
+    struct sigaction sa_ign = {0}, sa_old = {0};
+    sa_ign.sa_handler = SIG_IGN;
+    sigemptyset(&sa_ign.sa_mask);
+    sigaction(SIGINT, &sa_ign, &sa_old);
+
+    *timed_out = 0;
+    double t0 = now_sec();
+
+    pid_t pid = fork();
+    if (pid < 0){ perror("fork"); sigaction(SIGINT, &sa_old, NULL); return 1; }
+    if (pid == 0){
+        setpgid(0, 0);
+        sigaction(SIGINT, &sa_old, NULL);
+        execvp(cmd_argv[0], cmd_argv);
+        perror(cmd_argv[0]);
+        _exit(127);
+    }
+
+    int status = 0;
+    struct rusage ru;
+    pid_t w = -1;
+
+    if (timeout_sec > 0){
+        for(;;) {
+            w = wait4(pid, &status, WNOHANG, &ru);
+            if (w == pid) break;
+            if (w == -1 && errno != EINTR) { perror("wait4"); break; }
+
+            double elapsed = now_sec() - t0;
+            if((int)elapsed >= timeout_sec) {
+                *timed_out = 1;
+                kill(-pid, SIGKILL);
+            }
+            if (*timed_out) {
+                do { w = wait4(pid, &status, 0, &ru); } while (w == -1 && errno == EINTR);
+                break;
+            }
+            usleep(20000);   
+        }
+    } else {
+        do {w = wait4(pid, &status, 0, &ru); } while (w == -1 && errno == EINTR);
+    }
+
+    double t1 = now_sec();
+    sigaction(SIGINT, &sa_old, NULL);
+
+    if (w != pid) return 1;
+
+    *real_s = t1 - t0;
+    *user_s = (double)ru.ru_utime.tv_sec + (double)ru.ru_utime.tv_usec / 1e6;
+    *sys_s  = (double)ru.ru_stime.tv_sec + (double)ru.ru_stime.tv_usec / 1e6;
+    *maxrss_kb = ru.ru_maxrss;
+
+    if (WIFEXITED(status))         *status_code = WEXITSTATUS(status);
+    else if (WIFSIGNALED(status))  *status_code = 128 + WTERMSIG(status);
+    else                           *status_code = 1;
+
+    return 0;
+}
 
 static void miprof_save(const char *path, const char *cmdline,
                         double real_s, double user_s, double sys_s,
@@ -320,12 +381,12 @@ int main(void) {
     size_t cap = 0;
     int shell_status = 0;
 
-    for(;;) {
+    for (;;) {
         print_prompt();
 
-        ssize_t n = getline(&line , &cap, stdin);
-        if(n == -1){
-            if (isatty(STDIN_FILENO)) write(STDOUT_FILENO, "\n", 1);
+        ssize_t n = getline(&line, &cap, stdin);
+        if (n == -1) {
+            if (isatty(STDIN_FILENO)) { ssize_t _w = write(STDOUT_FILENO, "\n", 1); (void)_w; }
             break;
         }
 
@@ -334,46 +395,30 @@ int main(void) {
         if (L > 0 && line[L-1] == '\r') line[L-1] = '\0';
 
         char *t = trim(line);
-        if(*t == '\0') {
-            continue;
-        }
+        if (*t == '\0') continue;
 
-        if(strchr(t, '|') != NULL) {
+        if (strchr(t, '|') != NULL) {
             int k = 0;
             char **stages = split_delim(t, '|', &k);
             int rc = run_pipeline(stages, k);
             shell_status = rc;
-
             for (int i = 0; i < k; ++i) free(stages[i]);
             free(stages);
             continue;
         }
- 
+
         char **argv = tokenize_argv(t);
-        if(!argv[0]) {
-            free_argv(argv);
-            continue;
-        }
-        
-        if(strcmp(argv[0], "exit") == 0){
-            if(argv[1] == NULL){
-                free_argv(argv);
-                break;
-            } 
-            if (argv[2] != NULL){
-                fprintf(stderr, "exit: demasiados argumentos\n");
-                free_argv(argv);
-                continue;
-            } 
-        
-            char *end = NULL;
-            long v = strtol(argv[1], &end, 10);
-            if(argv[1][0] == '\0' || *end != '\0'){
+        if (!argv[0]) { free_argv(argv); continue; }
+
+        if (strcmp(argv[0], "exit") == 0) {
+            if (argv[1] == NULL) { free_argv(argv); break; }
+            if (argv[2] != NULL) { fprintf(stderr, "exit: demasiados argumentos\n"); free_argv(argv); continue; }
+            char *end = NULL; long v = strtol(argv[1], &end, 10);
+            if (argv[1][0] == '\0' || *end != '\0') {
                 fprintf(stderr, "exit: argumento no numerico: %s\n", argv[1]);
                 free_argv(argv);
                 continue;
-                }
-
+            }
             shell_status = (int)(v & 0xFF);
             free_argv(argv);
             break;
@@ -385,9 +430,7 @@ int main(void) {
             if (argc >= 3 && strcmp(argv[1], "ejec") == 0) {
                 char **cmd = &argv[2];
                 double real_s, user_s, sys_s; long maxrss_kb; int code;
-                if (miprof_exec_basic(cmd, &real_s, &user_s, &sys_s, &maxrss_kb, &code) != 0) {
-                    fprintf(stderr, "miprof: fallo al ejecutar\n");
-                }
+                (void)miprof_exec_basic(cmd, &real_s, &user_s, &sys_s, &maxrss_kb, &code);
                 char *cmdline = unir_argv(cmd);
                 printf("miprof: %s\n", cmdline);
                 printf("real=%.6fs user=%.6fs sys=%.6fs maxrss=%ld KiB\n",
@@ -396,15 +439,13 @@ int main(void) {
                 shell_status = code;
                 free(cmdline);
                 free_argv(argv);
-                continue;                 
+                continue;
             }
             else if (argc >= 4 && strcmp(argv[1], "ejecsave") == 0) {
                 const char *path = argv[2];
                 char **cmd = &argv[3];
                 double real_s, user_s, sys_s; long maxrss_kb; int code;
-                if (miprof_exec_basic(cmd, &real_s, &user_s, &sys_s, &maxrss_kb, &code) != 0) {
-                    fprintf(stderr, "miprof: fallo al ejecutar\n");
-                }
+                (void)miprof_exec_basic(cmd, &real_s, &user_s, &sys_s, &maxrss_kb, &code);
                 char *cmdline = unir_argv(cmd);
                 printf("miprof: %s\n", cmdline);
                 printf("real=%.6fs user=%.6fs sys=%.6fs maxrss=%ld KiB\n",
@@ -414,15 +455,41 @@ int main(void) {
                 shell_status = code;
                 free(cmdline);
                 free_argv(argv);
-                continue;                 
+                continue;
             }
-
-            else {
-                fprintf(stderr, "uso: miprof {ejec|ejecsave  <archivo>} comando [args...]\n");
+            else if (argc >= 4 && strcmp(argv[1], "ejecutar") == 0) {
+                char *end = NULL; long tsec = strtol(argv[2], &end, 10);
+                if (*end != '\0' || tsec <= 0) {
+                    fprintf(stderr, "miprof: maxtiempo inválido (segundos)\n");
+                    free_argv(argv);
+                    continue;
+                }
+                char **cmd = &argv[3];
+                double real_s, user_s, sys_s; long maxrss_kb; int code; int timed_out = 0;
+                (void)miprof_exec_timeout(cmd, (int)tsec, &real_s, &user_s, &sys_s,
+                                          &maxrss_kb, &timed_out, &code);
+                char *cmdline = unir_argv(cmd);
+                printf("miprof: %s\n", cmdline);
+                printf("real=%.6fs user=%.6fs sys=%.6fs maxrss=%ld KiB\n",
+                       real_s, user_s, sys_s, maxrss_kb);
+                if (timed_out) {
+                    printf("resultado=TIMEOUT (%lds)\n", tsec);
+                    shell_status = 124;
+                } else {
+                    printf("exit_status=%d\n", code);
+                    shell_status = code;
+                }
+                free(cmdline);
                 free_argv(argv);
-                continue;   
+                continue;
+            }
+            else {
+                fprintf(stderr, "uso: miprof {ejec|ejecsave <archivo>|ejecutar <maxtiempo>} comando [args...]\n");
+                free_argv(argv);
+                continue;
             }
         }
+
         int rc = runnear_comando(argv);
         shell_status = rc;
         free_argv(argv);
@@ -430,4 +497,5 @@ int main(void) {
 
     free(line);
     return shell_status;
-}  
+}
+ 
